@@ -1,0 +1,266 @@
+---
+title: "ex2"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, message=FALSE}
+
+# library for data wrangling
+
+rm(list=ls()) # removes all objects in the current Environment
+gc()
+setwd("C:/Users/scasella/OneDrive - Seves Spa/EX2 Dataset")
+
+library(data.table)
+library(dplyr)
+library(tidyverse)
+library(hhi) # Herfindahl-Hirschman Index
+
+# library for regression
+
+library(haven)         # For loading data from Stata
+library(broom)         # For showing models as data frames
+library(fixest)        # For fast, nice, fixed effects regression
+library(modelsummary)  # For side-by-side regression tables
+library(rdrobust)
+library(rddensity)
+library(modelsummary)
+library(stargazer)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE}
+### load 3 datasets
+
+load("sample.Rdata")
+load("Financial.Rdata")
+load("company2015.RData")
+```
+
+## Variable information from 2 datasets
+
+<br> 
+`sample.RData` - Patent Portfolio
+
+Source : `OECD, REGPAT Database, March 2018` - is presenting patent data that have been linked to regions utilising the addresses of the applicants and inventors
+
+| Variable                | Descriptions                                                      |
+|-------------------------|-------------------------------------------------------------------|
+| Patent_appln_id         | PATSTAT Application identifier                                    |
+| Company_name            | Company name                                                      |
+| Company_id              | Unique company identifier                                         |
+| Patent_publn_nr         | Patent publication number                                         |
+| Up_reg_code             |                                                                   | 
+| Reg_code                | NUTS3 region code                                                 |
+| Pub_nbr                 |                                                                   |
+| Prio_year               | Priority year (filing year for a patent)                          |
+| Ctry_code               | Country                                                           |
+| ipc                     | International Patent Classification                               |
+| Inv_name                | Inventor’s name                                                   |
+| Address                 | Address                                                           |
+| IPC4                    | List of International Patent Classification classes - 8th edition |
+
+
+`Financial.RData` - Top corporate R&D Investors - Financial data of those company on sample.Rdata above
+
+| Variable                | Descriptions                               |
+|-------------------------|--------------------------------------------|
+| Company_id              | Unique company identifier (from 1 - 2000)* |
+| Year                    | 2011 - 2014                                |
+| worldrank               | From 1 - 2000                              |
+| rd                      | Research and Development investment (MEUR) | 
+| ns                      | Net sales (MEUR)                           |
+| capex                   | Capital expenditure (MEUR)                 |
+| op                      | Operating profits (MEUR)                   |
+| emp                     | Number of employees                        |
+
+<br>
+
+
+
+```{r}
+### What is the firm portfolio ? 
+## number of Patent each company / firm portfolio
+
+dt <- unique(sample[,c("Company_name","Patent_appln_id")],by = c("Company_name","Patent_appln_id"))
+dt <- dt %>% group_by(Company_name) %>% summarize(nb_pat = n())
+NB_Pat <- dt[order(-dt$nb_pat),]
+head(NB_Pat,66)
+```
+
+## Combining 2 datasets
+
+- In the sample and Financial data sets, I'll create unique ID variables using the variables `Company_id` and `Prio_year`. 
+- In the Financial data, I removed the data from year 2009 because data for this year is not present in the Sample data set. 
+- I'll use the inner join method to join the rows matched by the newly created unique ID. 
+
+```{r}
+
+# create unique ID in both data sets to combine
+sample <- sample %>%
+  mutate(Company_id = as.character(Company_id)) %>%
+  unite(Id_column, Company_id, Prio_year, sep = "_", remove = FALSE, na.rm = FALSE)
+
+Financial <- Financial %>%
+  #mutate(Company_id = as.character(Company_id)) %>%
+  filter((is.na(Year) | Year != 2009)) %>%
+  inner_join(company2015, by = c("Company_id" = "Company_id")) %>%
+  unite(Id_column, Company_id, Year, sep = "_", remove = FALSE, na.rm = FALSE)
+
+## Inner join both data sets
+dt <- Financial %>%
+  inner_join(sample %>%
+               select(-Company_id, -Company_name, -Ctry_code),
+             by = c("Id_column" = "Id_column"))
+  
+
+dim(dt)  # dim is the function to returns the dimension like number of rows and columns
+```
+### Technological Diversification
+
+```{r}
+
+# herf function
+herf <- function(x){
+    sum(x^2)
+}
+
+# Technological diversification
+TD <- dt %>%
+  select(Patent_appln_id, Company_name, Prio_year, IPC4) %>%
+  group_by(Company_name, Prio_year, Patent_appln_id, IPC4) %>%
+  distinct(IPC4, .keep_all = TRUE) %>%
+  group_by(Company_name, IPC4, Prio_year) %>%
+  summarise(Ni = n()) %>%
+  group_by(Company_name, Prio_year) %>%
+  summarise(pat = sum(Ni, na.rm = TRUE),pj = Ni/sum(Ni)) %>%
+  mutate(`Technological_diversification` = herf(pj)) %>%
+  distinct(`Technological_diversification`, .keep_all = TRUE) %>%
+  unite(Id_column, Company_name, Prio_year, sep = "_", remove = FALSE, na.rm = FALSE) %>% # ID variable to merging the data later
+  select(-pat, -pj)
+
+TD
+```
+
+### Absorptive Capacity
+
+```{r}
+AC <- dt %>%
+  group_by(Company_name, Prio_year) %>%
+  summarise(rd = mean(rd), ns = mean(ns)) %>%
+  mutate(`Absorptive_Capacity` = rd/ns) %>%
+  unite(Id_column, Company_name, Prio_year, sep = "_", remove = FALSE, na.rm = FALSE) %>% # ID variable to merging the data later
+  select(-rd, -ns)
+
+AC
+```
+
+### Innovation Performance (Patent Value)
+
+```{r}
+IP <-dt %>%
+  distinct(Company_name, Prio_year, Patent_appln_id) %>%
+  group_by(Company_name, Prio_year) %>%
+  summarise(`Innovation_Performance` = n()) %>%
+  unite(Id_column, Company_name, Prio_year, sep = "_", remove = FALSE, na.rm = FALSE) # ID variable to merging the data later
+
+IP
+```
+
+## Environmental Dynamism
+```{r}
+ED <- dt %>%
+  #distinct(Company_name, Prio_year, NACE2) %>%
+  group_by(Company_name, Prio_year, NACE2) %>%
+  summarise(Environmental_Dynamism = mean(rd)) %>%
+  unite(Id_column, Company_name, Prio_year, sep = "_", remove = FALSE, na.rm = FALSE) # ID variable to merging the data later
+
+ED
+```
+
+## Count of location
+```{r}
+locations <- dt %>%
+  group_by(Company_name, Prio_year, Ctry_code) %>%
+  summarise(Locations = n()) %>%
+  unite(Id_column, Company_name, Prio_year, sep = "_", remove = FALSE, na.rm = FALSE) # ID variable to merging the data later
+
+locations
+```
+
+
+
+## Merging calculated variables in one dataset
+
+```{r}
+data <- TD %>%
+  inner_join(AC %>%
+               ungroup() %>%
+               select(-Company_name, -Prio_year), 
+             by = c("Id_column" = "Id_column")) %>%
+  inner_join(IP %>%
+               ungroup() %>%
+               select(-Company_name, -Prio_year),
+             by = c("Id_column" = "Id_column")) %>%
+  inner_join(ED %>%
+               ungroup() %>%
+               select(-Company_name, -Prio_year, -NACE2),
+             by = c("Id_column" = "Id_column")) %>%
+  inner_join(locations %>%
+               ungroup() %>%
+               select(-Company_name, -Prio_year, -Ctry_code),
+             by = c("Id_column" = "Id_column")) %>%
+  relocate(Company_name, Prio_year)
+
+data
+```
+```{r}
+stargazer(as.data.frame(data), type = "text",
+          header = FALSE,
+          single.row = FALSE)
+
+```
+
+
+### Regression (with taking logs)
+
+```{r}
+# TD and IP relationship
+m1 <- lm(log(Innovation_Performance + 1) ~ log(Technological_diversification + 1) + log(Locations) + factor(Prio_year) + factor(Company_name), data = data)
+
+#quadratic model
+m2 <- lm(log(Innovation_Performance + 1) ~ I(log(Technological_diversification + 1)^2) + log(Locations) + factor(Prio_year) + factor(Company_name) , data = data)
+
+# with year and company dummies
+m3 <- lm(log(Innovation_Performance + 1) ~ log(Technological_diversification + 1) + Absorptive_Capacity + Environmental_Dynamism + log(Locations) + factor(Prio_year) + factor(Company_name), data = data)
+
+# TD X AC 
+m4 <- lm(log(Innovation_Performance + 1) ~ log(Technological_diversification + 1) * Absorptive_Capacity + Absorptive_Capacity + log(Locations) + factor(Prio_year) + factor(Company_name), data = data)
+
+# TD X AC  without control variable
+m5 <- lm(log(Innovation_Performance + 1) ~ log(Technological_diversification + 1) * Absorptive_Capacity + Absorptive_Capacity, data = data)
+
+# TD X ED
+m6 <- lm(log(Innovation_Performance + 1) ~ log(Technological_diversification + 1) * Environmental_Dynamism + Environmental_Dynamism + log(Locations) + factor(Prio_year) + factor(Company_name), data = data)
+
+# TD X ED without control variable
+m7 <- lm(log(Innovation_Performance + 1) ~ log(Technological_diversification + 1) * Environmental_Dynamism + Environmental_Dynamism, data = data)
+
+# TD X Locations
+m8 <- lm(log(Innovation_Performance + 1) ~ log(Technological_diversification + 1) * Locations + Absorptive_Capacity + Environmental_Dynamism + log(Locations) + factor(Prio_year) + factor(Company_name), data = data)
+
+
+stargazer(m1, m2, m3, m4, m5,m6,m7,m8, type = "text")
+
+```
+
+
+
+
+
+
+
